@@ -1,0 +1,161 @@
+---
+title: "Using R and H2O Isolation Forest Anomaly detection for data quality - sample."
+author: "Carlos Kassab"
+date: "11/8/2019"
+output: html_document
+---
+
+
+```{r Anomalies Analysis For Data Quality}
+
+# Loading libraries
+suppressWarnings( suppressMessages( library( h2o ) ) ) 
+# For interactive plotting
+suppressWarnings( suppressMessages( library( dygraphs ) ) )
+suppressWarnings( suppressMessages( library( dplyr ) ) )
+suppressWarnings( suppressMessages( library( DT ) ) )
+
+# Start a single-node instance of H2O using all available processor cores and reserve 5GB of memory
+h2oServer = h2o.init( ip = "localhost", port = 54321, max_mem_size = "5g", nthreads = -1 )
+h2o.removeAll() # Removes all data from h2o cluster, ensuring it is clean.
+h2o.no_progress()  # Turn off progress bars for notebook readability
+
+# Setting H2O timezone for proper date data type handling
+#h2o.getTimezone() ===>>> UTC
+#h2o.listTimezones() # We can see all H2O timezones
+h2o.setTimezone("US/Central")
+
+# About the data:
+# I am using https://www.kaggle.com/bradklassen/pga-tour-20102018-data
+# The version I have is not the most updated version but anyway, a new version
+# may be used.
+# The file I am using is a csv 950 mb file with 9,720,530 including header.
+
+# Note. I am using Ubuntu 19.10, using /tmp directory
+# Every time I boot my computer, I need to copy the data file again to /tmp
+# directory.
+
+# Importing data file and setting data types accordingly.
+allData = read.csv( "/tmp/PGA_Tour_Golf_Data_2019_Kaggle.csv", sep = ",", header = T )
+
+# When using as.Posixct H2O is not importing data, so we are using as.Date.
+allData$Date = as.Date( allData$Date )
+allData$Value = as.numeric(allData$Value)
+
+# Convert dataset to H2O format.
+allData_hex = as.h2o( allData )
+
+# Build an Isolation forest model
+startTime <- Sys.time()
+startTime
+trainingModel = h2o.isolationForest( training_frame = allData_hex
+                                     , sample_rate = 0.1
+                                     , max_depth = 32
+                                     , ntrees = 100
+                                    )
+Sys.time()
+Sys.time() - startTime
+
+# According to H2O doc: 
+# http://docs.h2o.ai/h2o/latest-stable/h2o-docs/data-science/if.html
+#
+# Isolation Forest is similar in principle to Random Forest and is built on 
+# the basis of decision trees. 
+
+# Isolation Forest creates multiple decision trees to isolate observations.
+# 
+# Trees are split randomly, The assumption is that:
+#   
+#   IF ONE UNIT MEASUREMENTS ARE SIMILAR TO OTHERS,
+#   IT WILL TAKE MORE RANDOM SPLITS TO ISOLATE IT.
+# 
+#   The less splits needed, the unit is more likely to be anomalous.
+# 
+# The average number of splits is then used as a score.
+
+# Calculate score for all data.
+startTime <- Sys.time()
+startTime
+score = h2o.predict( trainingModel, allData_hex )
+result_pred = as.vector( score$predict )
+Sys.time()
+Sys.time() - startTime
+
+################################################################################
+# Setting threshold value for anomaly detection.
+################################################################################
+
+# Setting desired threshold percentage.
+threshold = .999 # Let's say we want the .001% data different than the rest.
+
+# Using this threshold to get score limit to filter data anomalies.
+scoreLimit = round( quantile( result_pred, threshold ), 4 )
+
+# Add row score at the beginning of dataset
+allData = cbind( RowScore = round( result_pred, 4 ), allData )
+
+# Get data anomalies by filtering all data.
+anomalies = allData[ allData$RowScore > scoreLimit, ]
+
+# As we can see in the summary:
+summary(anomalies)
+
+# The Statistic: GIR Percentage - 100+ yards is one of the most important values
+# Filtering all anomalies within this Statistic value
+statisticFilter = "GIR Percentage - 100+ yards"
+
+specificVar = anomalies %>%
+  filter(Statistic==statisticFilter)
+
+cat( statisticFilter,": ", dim(specificVar)[1] )
+  
+if( dim(specificVar)[1]  > 0 ) {
+
+  # We want to know the relation between Players and "Approaches from 200-225 yards"
+  # So, in order to get a chart, we assign a code to each player
+  # Since factors in R are really integer values, we do this to get the codes:
+  specificVar$PlayerCode = as.integer(specificVar$Player.Name) 
+  
+  # To sort our dataset we convert the date to numeric 
+  specificVar$DateAsNum = as.numeric( paste0( substr(specificVar$Date,1,4)
+                                                      , substr(specificVar$Date,6,7)
+                                                      , substr(specificVar$Date,9,10) ) )
+  # And sort the data frame.
+  specificVar = specificVar[order(specificVar$DateAsNum),]
+  # Set records num using a sequence.
+  rownames(specificVar) = seq(1:dim(specificVar)[1])
+  
+  colNamesFinalTable = c( "PlayerCode", "Player.Name", "Date", "Variable", "Value" )
+  specificVar = specificVar[, colNamesFinalTable]
+  specificVar$PlayerCode = as.factor(specificVar$PlayerCode)
+  
+  # Creating our final dataframe for our chart.
+  specificVarChartData = data.frame( SeqNum = as.integer( rownames(specificVar) )
+                                             , PlayerCode = specificVar$PlayerCode
+                                             , Value = specificVar$Value
+                                             )
+  
+
+  
+  AnomaliesGraph = dygraph( specificVarChartData, main = ''
+                      , xlab = paste(statisticFilter,"Anomaly Number."), ylab = "Player Code." ) %>%
+    dyAxis("y", label = "Player Code.") %>%
+    dyAxis("y2", label = "Value.", independentTicks = TRUE) %>%
+    dySeries( name = "PlayerCode", label = "Player Code.", drawPoints = TRUE, pointShape = "dot"
+              , color = "blue", pointSize = 2 ) %>%
+    dySeries( name = "Value", label = "Value.", drawPoints = TRUE, pointShape = "dot"
+              , color = "green", pointSize = 2, axis = 'y2' ) %>%
+    dyRangeSelector()
+  dyOptions( AnomaliesGraph, digitsAfterDecimal = 0 )
+}
+
+
+```
+
+```{r, Anomalies Table, echo=FALSE, comment="", warning=FALSE, message=FALSE}
+if( dim(specificVar)[1]  > 0 ) {
+  DT::datatable( specificVar, filter = "top"
+                 , colnames = c( "Player Code", "Player Name", "Date", "Variable", "Value" ) )
+}
+```
+
